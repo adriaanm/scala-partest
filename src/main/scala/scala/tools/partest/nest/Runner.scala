@@ -14,14 +14,13 @@ import scala.collection.mutable.ListBuffer
 import scala.concurrent.duration.Duration
 import scala.io.Codec
 import scala.reflect.internal.FatalError
+import scala.reflect.internal.util.ScalaClassLoader
 import scala.sys.process.{ Process, ProcessLogger }
 import scala.tools.nsc.Properties.{ envOrElse, isWin, jdkHome, javaHome, propOrElse, propOrEmpty, setProp, versionMsg, javaVmName, javaVmVersion, javaVmInfo }
 import scala.tools.nsc.{ Settings, CompilerCommand, Global }
-import scala.tools.nsc.io.{ AbstractFile, PlainFile }
+import scala.tools.nsc.io.{ AbstractFile }
 import scala.tools.nsc.reporters.ConsoleReporter
-import scala.tools.nsc.util.{ Exceptional, ScalaClassLoader, stackTraceString }
-import scala.tools.scalap.Main.decompileScala
-import scala.tools.scalap.scalax.rules.scalasig.ByteCode
+import scala.tools.nsc.util.{ Exceptional, stackTraceString }
 import scala.util.{ Try, Success, Failure }
 import ClassPath.{ join, split }
 import TestState.{ Pass, Fail, Crash, Uninitialized, Updated }
@@ -58,7 +57,7 @@ class Runner(val testFile: File, val suiteRunner: SuiteRunner) {
   def isEnumeratedTest = false
 
   private var _lastState: TestState = null
-  private var _transcript = new TestTranscript
+  private val _transcript = new TestTranscript
 
   def lastState                   = if (_lastState == null) Uninitialized(testFile) else _lastState
   def setLastState(s: TestState)  = _lastState = s
@@ -79,7 +78,7 @@ class Runner(val testFile: File, val suiteRunner: SuiteRunner) {
   type RanOneTest = (Boolean, LogContext)
 
   def showCrashInfo(t: Throwable) {
-    System.err.println("Crashed running test $testIdent: " + t)
+    System.err.println(s"Crashed running test $testIdent: " + t)
     if (!isPartestTerse)
       System.err.println(stackTraceString(t))
   }
@@ -236,60 +235,54 @@ class Runner(val testFile: File, val suiteRunner: SuiteRunner) {
     false
   }
 
-  /** Filter the diff for conditional blocks.
+  /** Filter the check file for conditional blocks.
    *  The check file can contain lines of the form:
    *  `#partest java7`
    *  where the line contains a conventional flag name.
-   *  In the diff output, these lines have the form:
-   *  `> #partest java7`
-   *  Blocks which don't apply are filtered out,
-   *  and what remains is the desired diff.
-   *  Line edit commands such as `0a1,6` don't count
-   *  as diff, so return a nonempty diff only if
-   *  material diff output was seen.
-   *  Filtering the diff output (instead of every check
-   *  file) means that we only post-process a test that
-   *  might be failing, in the normal case.
+   *  If the flag tests true, succeeding lines are retained
+   *  (removed on false) until the next #partest flag.
+   *  A missing flag evaluates the same as true.
    */
-  def diffilter(d: String) = {
+  def filteredCheck: Seq[String] = {
     import scala.util.Properties.{javaVersion, isAvian}
-    val prefix = "#partest"
-    val margin = "> "
-    val leader = margin + prefix
     // use lines in block so labeled? Default to sorry, Charlie.
-    def retainOn(f: String) = {
+    def retainOn(expr: String) = {
+      val f = expr.trim
+      def flagWasSet(f: String) = suiteRunner.scalacExtraArgs contains f
       val (invert, token) =
         if (f startsWith "!") (true, f drop 1) else (false, f)
-      val cond = token match {
+      val cond = token.trim match {
+        case "java8"  => javaVersion startsWith "1.8"
         case "java7"  => javaVersion startsWith "1.7"
         case "java6"  => javaVersion startsWith "1.6"
         case "avian"  => isAvian
         case "true"   => true
-        case _        => false
+        case "-optimise" | "-optimize"
+                      => flagWasSet("-optimise") || flagWasSet("-optimize")
+        case flag if flag startsWith "-"
+                      => flagWasSet(flag)
+        case rest     => rest.isEmpty
       }
       if (invert) !cond else cond
     }
-    if (d contains prefix) {
-      val sb = new StringBuilder
-      var retain = true           // use the current line
-      var material = false        // saw a line of diff
-      for (line <- d.lines)
-        if (line startsWith leader) {
-          val rest = (line stripPrefix leader).trim
-          retain = retainOn(rest)
-        } else if (retain) {
-          if (line startsWith margin) material = true
-          sb ++= line
-          sb ++= EOL
-        }
-      if (material) sb.toString else ""
-    } else d
+    val prefix = "#partest"
+    val b = new ListBuffer[String]()
+    var on = true
+    for (line <- file2String(checkFile).lines) {
+      if (line startsWith prefix) {
+        on = retainOn(line stripPrefix prefix)
+      } else if (on) {
+        b += line
+      }
+    }
+    b.toList
   }
 
-  def currentDiff = (
-    if (checkFile.canRead) diffilter(compareFiles(original = checkFile, revised = logFile))
-    else compareContents(original = Nil, revised = augmentString(file2String(logFile)).lines.toList)
-  )
+  def currentDiff = {
+    val logged = augmentString(file2String(logFile)).lines.toList
+    val (other, othername) = if (checkFile.canRead) (filteredCheck, checkFile.getName) else (Nil, "empty")
+    compareContents(original = other, revised = logged, originalName = othername, revisedName = logFile.getName)
+  }
 
   val gitRunner = List("/usr/local/bin/git", "/usr/bin/git") map (f => new java.io.File(f)) find (_.canRead)
   val gitDiffOptions = "--ignore-space-at-eol --no-index " + propOrEmpty("partest.git_diff_options")
@@ -318,6 +311,8 @@ class Runner(val testFile: File, val suiteRunner: SuiteRunner) {
    *  any Windows backslashes with the one true file separator char.
    */
   def normalizeLog() {
+    import scala.util.matching.Regex
+
     // Apply judiciously; there are line comments in the "stub implementations" error output.
     val slashes    = """[/\\]+""".r
     def squashSlashes(s: String) = slashes replaceAllIn (s, "/")
@@ -329,9 +324,10 @@ class Runner(val testFile: File, val suiteRunner: SuiteRunner) {
     val ellipsis   = "" //".../"    // using * looks like a comment
 
     // no spaces in test file paths below root, because otherwise how to detect end of path string?
-    val pathFinder = raw"""(?i)\Q${elided}${File.separator}\E([\${File.separator}\w]*)""".r
+    val pathFinder = raw"""(?i)\Q${elided}${File.separator}\E([\${File.separator}\S]*)""".r
     def canonicalize(s: String): String = (
-      pathFinder replaceAllIn (s, m => ellipsis + squashSlashes(m group 1))
+      pathFinder replaceAllIn (s, m =>
+        Regex.quoteReplacement(ellipsis + squashSlashes(m group 1)))
     )
 
     def masters    = {
@@ -461,13 +457,7 @@ class Runner(val testFile: File, val suiteRunner: SuiteRunner) {
 
     def fsString = fs map (_.toString stripPrefix parentFile.toString + "/") mkString " "
     def isOk = result.isOk
-    def mkScalacString(): String = {
-      val flags = file2String(flagsFile) match {
-        case ""   => ""
-        case s    => " " + s
-      }
-      s"""scalac $fsString"""
-    }
+    def mkScalacString(): String = s"""scalac $fsString"""
     override def toString = description + ( if (result.isOk) "" else "\n" + result.status )
   }
   case class OnlyJava(fs: List[File]) extends CompileRound {
@@ -677,6 +667,9 @@ class Runner(val testFile: File, val suiteRunner: SuiteRunner) {
   }
 
   def run(): TestState = {
+    // javac runner, for one, would merely append to an existing log file, so just delete it before we start
+    logFile.delete()
+
     if (kind == "neg" || (kind endsWith "-neg")) runNegTest()
     else kind match {
       case "pos"          => runTestCommon(true)
@@ -691,16 +684,40 @@ class Runner(val testFile: File, val suiteRunner: SuiteRunner) {
     lastState
   }
 
+  private def decompileClass(clazz: Class[_], isPackageObject: Boolean): String = {
+    import scala.tools.scalap
+
+    // TODO: remove use of reflection once Scala 2.11.0-RC1 is out
+    // have to use reflection to work on both 2.11.0-M8 and 2.11.0-RC1.
+    // Once we require only 2.11.0-RC1, replace the following block by:
+    // import scalap.scalax.rules.scalasig.ByteCode
+    // ByteCode forClass clazz bytes
+    val bytes = {
+      import scala.language.{reflectiveCalls, existentials}
+      type ByteCode       = { def bytes: Array[Byte] }
+      type ByteCodeModule = { def forClass(clazz: Class[_]): ByteCode }
+      val ByteCode        = {
+        val ByteCodeModuleCls =
+          // RC1 package structure -- see: scala/scala#3588 and https://issues.scala-lang.org/browse/SI-8345
+          (util.Try { Class.forName("scala.tools.scalap.scalax.rules.scalasig.ByteCode$") }
+          // M8 package structure
+           getOrElse  Class.forName("scala.tools.scalap.scalasig.ByteCode$"))
+        ByteCodeModuleCls.getDeclaredFields()(0).get(null).asInstanceOf[ByteCodeModule]
+      }
+      ByteCode forClass clazz bytes
+    }
+
+    scalap.Main.decompileScala(bytes, isPackageObject)
+  }
+
   def runScalapTest() = runTestCommon {
     val isPackageObject = testFile.getName startsWith "package"
     val className       = testFile.getName.stripSuffix(".scala").capitalize + (if (!isPackageObject) "" else ".package")
     val loader          = ScalaClassLoader.fromURLs(List(outDir.toURI.toURL), this.getClass.getClassLoader)
-    val byteCode        = ByteCode forClass (loader loadClass className)
-    val result          = decompileScala(byteCode.bytes, isPackageObject)
-
-    logFile writeAll result
+    logFile writeAll decompileClass(loader loadClass className, isPackageObject)
     diffIsOk
   }
+
   def runScriptTest() = {
     import scala.sys.process._
     val (swr, wr) = newTestWriters()
@@ -729,7 +746,7 @@ object Properties extends scala.util.PropertiesTrait {
 
 /** Extended by Ant- and ConsoleRunner for running a set of tests. */
 class SuiteRunner(
-  val testSourcePath: String,
+  val testSourcePath: String, // relative path, like "files", or "pending"
   val fileManager: FileManager,
   val updateCheck: Boolean,
   val failed: Boolean,
@@ -776,7 +793,7 @@ class SuiteRunner(
       if (failed && !runner.logFile.canRead)
         runner.genPass()
       else {
-        val (state, elapsed) =
+        val (state, _) =
           try timed(runner.run())
           catch {
             case t: Throwable => throw new RuntimeException(s"Error running $testFile", t)
@@ -792,7 +809,7 @@ class SuiteRunner(
     NestUI.resetTestNumber(kindFiles.size)
 
     val pool              = Executors newFixedThreadPool numThreads
-    val futures           = kindFiles map (f => pool submit callable(runTest(f)))
+    val futures           = kindFiles map (f => pool submit callable(runTest(f.getAbsoluteFile)))
 
     pool.shutdown()
     Try (pool.awaitTermination(waitTime) {

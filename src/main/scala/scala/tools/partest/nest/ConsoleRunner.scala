@@ -8,7 +8,7 @@ package partest
 package nest
 
 import utils.Properties._
-import scala.tools.nsc.Properties.{ versionMsg, setProp }
+import scala.tools.nsc.Properties.{ versionMsg, propOrFalse, setProp }
 import scala.collection.{ mutable, immutable }
 import TestKinds._
 import scala.reflect.internal.util.Collections.distinctBy
@@ -19,7 +19,7 @@ class ConsoleRunner(argstr: String) extends {
 } with ConsoleRunnerSpec with Instance {
 
   val suiteRunner = new SuiteRunner (
-    testSourcePath = optSourcePath.map(_.getAbsolutePath) getOrElse PartestDefaults.sourcePath,
+    testSourcePath = optSourcePath getOrElse PartestDefaults.sourcePath,
     fileManager = new FileManager(ClassPath split PathResolver.Environment.javaUserClassPath map (Path(_))), // the script sets up our classpath for us via ant
     updateCheck = optUpdateCheck,
     failed = optFailed)
@@ -93,9 +93,9 @@ class ConsoleRunner(argstr: String) extends {
   }
 
   def run(): Unit = {
-    if (optDebug) NestUI.setDebug()
-    if (optVerbose) NestUI.setVerbose()
-    if (optTerse) NestUI.setTerse()
+    if (optDebug || propOrFalse("partest.debug")) NestUI.setDebug()
+    if (optVerbose)  NestUI.setVerbose()
+    if (optTerse)    NestUI.setTerse()
     if (optShowDiff) NestUI.setDiffOnFail()
 
     // Early return on no args, version, or invalid args
@@ -112,7 +112,8 @@ class ConsoleRunner(argstr: String) extends {
 
     optTimeout foreach (x => setProp("partest.timeout", x))
 
-    NestUI echo banner
+    if (!isPartestTerse)
+      NestUI echo banner
 
     val partestTests = (
       if (optSelfTest) TestKinds.testsForPartest
@@ -169,7 +170,7 @@ class ConsoleRunner(argstr: String) extends {
         val num = paths.size
         val ss = if (num == 1) "" else "s"
         comment(s"starting $num test$ss in $kind")
-        val results = runTestsForFiles(paths map (_.jfile), kind)
+        val results = runTestsForFiles(paths map (_.jfile.getAbsoluteFile), kind)
         val (passed, failed) = results partition (_.isOk)
 
         passedTests ++= passed
