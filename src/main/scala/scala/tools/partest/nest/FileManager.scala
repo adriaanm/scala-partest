@@ -93,8 +93,11 @@ object FileManager {
    */
   def compareContents(original: Seq[String], revised: Seq[String], originalName: String = "a", revisedName: String = "b"): String = {
     import collection.JavaConverters._
+    object ignoreWhitespace extends difflib.myers.Equalizer[String] {
+      def equals(orig: String, revised: String) = orig.trim == revised.trim
+    }
 
-    val diff = difflib.DiffUtils.diff(original.asJava, revised.asJava)
+    val diff = difflib.DiffUtils.diff(original.asJava, revised.asJava, ignoreWhitespace)
     if (diff.getDeltas.isEmpty) ""
     else difflib.DiffUtils.generateUnifiedDiff(originalName, revisedName, original.asJava, diff, 1).asScala.mkString("\n")
   }
