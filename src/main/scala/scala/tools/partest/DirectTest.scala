@@ -15,7 +15,7 @@ import scala.tools.cmd.CommandLineParser
  *  It allows for more complete control over settings, compiler
  *  configuration, sequence of events, etc. than does partest.
  */
-abstract class DirectTest extends App {
+abstract class DirectTest  { // extends App
   // The program being tested in some fashion
   def code: String
   // produce the output to be compared against a checkfile

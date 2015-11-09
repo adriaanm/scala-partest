@@ -4,28 +4,20 @@ scalaModuleSettings
 
 name                       := "scala-partest"
 
-version                    := "1.0.10-SNAPSHOT"
+version                    := "1.0.10-fields"
 
-scalaVersion               := crossScalaVersions.value.head
+scalaVersion               := "2.12.0-fields"
 
-crossScalaVersions         := {
-  val java = System.getProperty("java.version")
-  if (java.startsWith("1.6."))
-    Seq("2.11.6", "2.12.0-M1")
-  else if (java.startsWith("1.8."))
-    Seq("2.12.0-M2")
-  else
-    sys.error(s"don't know what Scala versions to build on $java")
-}
+scalaHome := Some(file("/Users/adriaan/git/scala/build/pack"))
 
-scalaXmlVersion            := "1.0.4"
+scalaXmlVersion            := "1.0.5"
 
 scalaCheckVersion          := "1.11.6"
 
 // TODO: eliminate "-deprecation:false" for nightlies,
 //   included by default because we don't want to break scala/scala pr validation
 scalacOptions ++=
-  Seq("-feature", "-deprecation:false", "-unchecked", "-Xlint", "-Xfatal-warnings") ++
+  Seq("-Ydebug", "-feature", "-deprecation:false", "-unchecked", "-Xlint") ++
   (CrossVersion.partialVersion(scalaVersion.value) match {
     case Some((2, scalaMajor)) if scalaMajor < 12 =>
       Seq("-optimize")
@@ -42,12 +34,12 @@ libraryDependencies += "com.googlecode.java-diff-utils" % "diffutils"      % "1.
 libraryDependencies += "org.scala-sbt"                  % "test-interface" % "1.0"
 
 // to run scalacheck tests, depend on scalacheck separately
-libraryDependencies += "org.scalacheck"                %% "scalacheck"     % scalaCheckVersion.value % "provided"
+libraryDependencies += "org.scalacheck"                 % "scalacheck_2.12.0-M3"     % scalaCheckVersion.value % "provided"
 
 // mark all scala dependencies as provided which means one has to explicitly provide them when depending on partest
 // this allows for easy testing of modules (like scala-xml) that provide tested classes themselves and shouldn't
 // pull in an older version of itself
-libraryDependencies += "org.scala-lang.modules"        %% "scala-xml"      % scalaXmlVersion.value % "provided" intransitive()
+libraryDependencies += "org.scala-lang.modules"         % "scala-xml_2.12.0-M3"      % scalaXmlVersion.value % "provided" intransitive()
 
 libraryDependencies += "org.scala-lang"                 % "scalap"         % scalaVersion.value % "provided" intransitive()
 
